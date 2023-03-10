@@ -201,7 +201,10 @@ export IP_ADDRESS=$(gcloud compute addresses describe web-ip --format='value(add
 Usually, a regular Internet user does not remember the IP address of every service they consume but they remember their 
 domain name. 
 
-So, we'll buy and register a domain name in order to map it with the `web-ip` previously created.
+So, we should buy and register a domain name in order to map it with the `web-ip` previously created.
+
+Since this is a tutorial, that won't happen. We'll use the IP address raw.
+
 
 ## 5 - Create an Ingress
 
@@ -212,24 +215,27 @@ Initially, the Ingress will only handle HTTP requests, and then we'll add the SS
 
 First, execute this command to declare an Ingress YAML manifest:
 ```bash
-cat <<EOF > ingress.yaml
+cat << EOF > ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: web-ingress
   annotations:
-    # This tells Google Cloud to create an External Load Balancer to realize this Ingress
-    kubernetes.io/ingress.class: gce
-    # This enables HTTP connections from Internet clients
-    kubernetes.io/ingress.allow-http: "true"
-    # This tells Google Cloud to associate the External Load Balancer with the static IP which we created earlier
-    kubernetes.io/ingress.global-static-ip-name: web-ip
+    kubernetes.io/ingress.class: gce                    # Tell GCP to create an External LB to realize this Ingress
+    kubernetes.io/ingress.allow-http: "true"            # Enable HTTP connections from Internet clients
+    kubernetes.io/ingress.global-static-ip-name: web-ip # Tell GCP to associate the External LB with the static IP
 spec:
-  defaultBackend:
-    service:
-      name: web
-      port:
-        number: 8080
+ rules:
+  - host: ${DOMAIN_NAME}  # ! Replace with the registered domain name
+    http:
+      paths:
+      - pathType: Prefix
+        path: /
+        backend:
+          service:
+            name: web
+            port:
+              number: 8080
 EOF
 ```
 ---
@@ -293,6 +299,13 @@ Finally, the web server should be reachable through insecure HTTP requests like 
 curl http://$DOMAIN_NAME
 ```
 
+Or if we haven't bought a domain, we'll hit the static IP address:
+```bash
+IP_ADDRESS=$(gcloud compute addresses describe web-ip --format='value(address)' --global)
+curl http://$IP_ADDRESS
+```
+
+
 This is the expected outcome from previous command:
 ```bash
 Hello, world!
@@ -308,14 +321,308 @@ We'll do it via Helm again. So we'll use the first section as reference.
 
 ## 7 - Create an Issuer for Let's Encrypt in Staging
 
+In order to create a new SSL Certificate, cert-manager needs to be instructed on how to sign it. So, an `Issuer` custom
+resource needs to be configured to connect with Let's Encrypt staging server, allowing us to test our setup without 
+consuming our Let's Encrypt certificate quota for the domain name.
+
+Generate the `Issuer` manifest, **change the email address env var** before executing it:
+```bash
+EMAIL_ADDRESS=your_email_here # ! Replace with your email
+
+cat << EOF > issuer-lets-encrypt-staging.yaml
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: ${EMAIL_ADDRESS} # ❗ Replace this with your email address
+    privateKeySecretRef:
+      name: letsencrypt-staging
+    solvers:
+    - http01:
+        ingress:
+          name: web-ingress
+EOF
+```
+
+Then apply it with kubectl:
+```bash
+kubectl apply -f issuer-lets-encrypt-staging.yaml
+```
+
+Verify `Issuer`'s state with:
+
+```bash
+kubectl describe issuers.cert-manager.io letsencrypt-staging
+```
+
+Expected output is:
+```bash
+Status:
+  Acme:
+    Last Registered Email:  firstname.lastname@example.com
+    Uri:                    https://acme-staging-v02.api.letsencrypt.org/acme/acct/60706744
+  Conditions:
+    Last Transition Time:  2022-07-13T16:13:25Z
+    Message:               The ACME account was registered with the ACME server
+    Observed Generation:   1
+    Reason:                ACMEAccountRegistered
+    Status:                True
+    Type:                  Ready
+```
 
 ## 8 - Re-configure the Ingress for SSL
+
+It's time to use our new certificate and for that we need to reconfigure the Ingress to accept `HTTPS`.
+
+First, we need to use a workaround for a chicken-and-egg issue where the `ingress-gce` controller won't update its 
+forwarding rules unless it can first find the Secret that will eventually contain the SSL certificate. But Let's 
+Encrypt won't sign the SSL certificate until it can get the special `.../.well-known/acme-challenge/...` URL which 
+cert-manager adds to the Ingress and which must then be translated into Google Cloud forwarding rules, by the 
+`ingress-gce` controller.
+
+So, we need to first create an empty secret:
+```bash
+cat << EOF > secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: web-ssl
+type: kubernetes.io/tls
+stringData:
+  tls.key: ""
+  tls.crt: ""
+EOF
+```
+Then apply secret's manifest:
+```bash
+kubectl apply -f secret.yaml
+```
+
+Done with the workaround, it's time to update Ingress' manifest definition to use the staging certificate.
+
+First, define an environmental variable for the registered domain:
+```bash
+DOMAIN_NAME=your_domain_here
+```
+
+Then, update Ingress' definition with `cert-manager`'s annotation & the `tls` spec block:
+```bash
+cat << EOF > ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web-ingress
+  annotations:
+    kubernetes.io/ingress.class: gce                    # Tell GCP to create an External LB to realize this Ingress
+    kubernetes.io/ingress.allow-http: "true"            # Enable HTTP connections from Internet clients
+    kubernetes.io/ingress.global-static-ip-name: web-ip # Tell GCP to associate the External LB with the static IP 
+    cert-manager.io/issuer: letsencrypt-staging         # Use Let's Encrypt staging server
+spec:
+ rules:
+  - host: ${DOMAIN_NAME}
+    http:
+      paths:
+      - pathType: Prefix
+        path: /
+        backend:
+          service:
+            name: web
+            port:
+              number: 8080
+  tls:
+    - secretName: web-ssl
+      hosts:
+       - ${DOMAIN_NAME}  # ! Replace with the registered domain name
+EOF
+```
+---
+### Ingress annotations
+
+#### cert-manager.io/issuer: letsencrypt-staging
+References the name of an `Issuer` to acquire the certificate required for this Ingress. The `Issuer` must be in the 
+same namespace as the Ingress resource.
+
+### Secret linkage
+The `tls` spec references the empty secret with the domain name we've just registered, linking the Ingress resource
+with it.
+```bash
+spec:
+  tls:
+    - secretName: web-ssl
+      hosts:
+        - <DOMAIN_NAME>
+```
+
+---
+
+After updating Ingress' definition, apply it:
+```bash
+kubectl apply -f ingress.yaml
+```
+
+This triggers some complex operations that may last up to ~5 minutes and could eventually fail. However, after some 
+attempts they should all succeed because cert-manager and Google's `ingress-gce` will periodically re-reconcile.
+
+When all the pieces are set, the web server should be accessible using HTTPS. Verify this with:
+```bash
+curl -v --insecure https://$DOMAIN_NAME
+```
+
+Or if the IP address was used:
+```bash
+IP_ADDRESS=$(gcloud compute addresses describe web-ip --format='value(address)' --global)
+curl -v --insecure https://$IP_ADDRESS
+```
 
 
 ## 9 - Create a production ready SSL certificate
 
+Once everything is working fine in Let's Encrypt's staging server, switch to the production and get a trusted SSL 
+certificate.
 
-## 10 - Clean up
+First, a Let's Encrypt production `Issuer` resource must be declared:
+```bash
+cat << EOF > issuer-lets-encrypt-production.yaml
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${EMAIL_ADDRESS} # ❗ Replace this with your email address
+    privateKeySecretRef:
+      name: letsencrypt-production
+    solvers:
+    - http01:
+        ingress:
+          name: web-ingress
+EOF
+```
+
+Then it must be applied:
+```bash
+kubectl apply -f issuer-lets-encrypt-production.yaml
+```
+
+Verify it's working with:
+```bash
+kubectl describe issuers.cert-manager.io letsencrypt-production
+```
+
+Finally, update Ingress' annotation to use the production server instead of staging:
+```bash
+kubectl annotate ingress web-ingress cert-manager.io/issuer=letsencrypt-production --overwrite
+```
+
+This command will:
+- Trigger the generation of a new SSL certificate signed by Let's Encrypt production CA.
+- Will store that new SSL certificate in `web-ssl` Secret. 
+
+After ~10 minutes, when the GCP load balancer gets synced with Let's Encrypt cert, the web server will be accessible
+via secure HTTPS.
+
+Validate with:
+```bash
+curl -v https://$DOMAIN_NAME
+```
+
+Or if the IP address was used:
+```bash
+IP_ADDRESS=$(gcloud compute addresses describe web-ip --format='value(address)' --global)
+curl -v https://$IP_ADDRESS
+```
+
+Either way, expected output is:
+```bash
+...
+* Server certificate:
+*  subject: CN=www.example.com
+*  start date: Jul 14 09:44:29 2022 GMT
+*  expire date: Oct 12 09:44:28 2022 GMT
+*  subjectAltName: host "www.example.com" matched cert's "www.example.com"
+*  issuer: C=US; O=Let's Encrypt; CN=R3
+*  SSL certificate verify ok.
+...
+Hello, world!
+Version: 1.0.0
+Hostname: web-79d88c97d6-t8hj2
+```
+
+Remember it's also accessible via the browser, without any errors nor warnings, at: 
+[https://$DOMAIN_NAME](https://$DOMAIN_NAME)
+
+
+## 10 - Recap
+
+### Part 1
+
+Set up the environment:
+
+Create cluster -> generate static IP address -> HTTP:8080 Ingress -> register a domain and create an A record with the 
+static IP to solve DNS queries.
+
+At this point we expose our web server via HTTP using a domain name with our static IP address.
+
+---
+### Part 2
+
+Then, the SSL process begins:
+
+install cert-manager -> create issuer manifest using Let's Encrypt staging server -> define an empty TLS secret -> 
+update Ingress config with:
+- cert-manager.io/issuer: letsencrypt-staging annotation.
+- spec tls: referencing the created 
+secret and defining our domain name.
+
+At this point we expose our web server via insecure HTTPS since we're using LE staging server.
+
+#### How does it work?
+cert-manager verifies Ingress' endpoint, detects the secret definition and auto-generates a signed certificate for the specified domain using the
+`Issuer` custom resource as issuer.  
+
+---
+
+### Part 3
+
+Finally, the SSL process concludes:
+create issuer manifest using Let's Encrypt production server (secret will be auto-updated) -> update Ingress config with:
+- cert-manager.io/issuer: letsencrypt-production annotation.
+
+At this point we expose our web server via secure HTTP since we're using LE production server. The web server can be 
+accessed through the browser.
+
+---
+
+Here's a brief summary of all the operations performed by cert-manager & ingress-gce:
+
+1. cert-manager connects to Let's Encrypt and sends an SSL certificate signing request.
+2. Let's Encrypt responds with a "challenge", which is a unique token that cert-manager must make available at a well-known location on the target web site. This proves that you are an administrator of that web site and domain name.
+3. cert-manager deploys a Pod containing a temporary web server that serves the Let's Encrypt challenge token.
+4. cert-manager reconfigures the Ingress, adding a `rule` to route requests for from Let's Encrypt to that temporary web server.
+5. Google Cloud ingress controller reconfigures the external HTTP load balancer with that new rule.
+6. Let's Encrypt now connects and receives the expected challenge token and the signs the SSL certificate and returns it to cert-manager.
+7. cert-manager stores the signed SSL certificate in the Kubernetes Secret called `web-ssl.
+8. Google Cloud ingress controller uploads the signed certificate and associated private key to a Google Cloud certificate.
+9. Google Cloud ingress controller reconfigures the external load balancer to serve the uploaded SSL certificate.
+
+---
+
+We: 
+
+1. Created a kubernetes cluster.
+2. Deployed a web server internally.
+3. Created a static IP address.
+4. Created a domain name and its A record with our static IP.
+5. Deployed an Ingress and exposed our web server insecurely via HTTP:8080.
+6. Installed cert-manager.
+7. Created an
+
+
+## 11 - Clean up
 
 
 # Uninstall cert-manager
