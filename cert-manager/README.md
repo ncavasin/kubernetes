@@ -18,7 +18,7 @@ First of all, use `kind` to create a new Kubernetes cluster with one master and 
 `config.yaml` manifest:
 
 ```bash
-kind create cluster --config=config.yaml
+kind create cluster --config=config.yml
 ```
 
 Then, add the Helm repository required to install cert-manager:
@@ -131,7 +131,7 @@ kubectl delete -f https://github.com/cert-manager/cert-manager/releases/download
 
 Finally, delete kind's cluster with:
 ```bash
-kind delete cluster --config=config.yaml
+kind delete cluster --config=config.yml
 ```
 
 # Real world implementation 
