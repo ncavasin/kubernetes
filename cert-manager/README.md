@@ -112,17 +112,39 @@ Delete the test certificate with:
 kubectl delete -f test-resources.yaml
 ```
 
+## Clean up
+
+First, it's required to uninstall the tool itself using:
+```bash
+helm --namespace cert-manager delete cert-manager
+```
+
+Then, delete the namespace: 
+```bash
+kubectl delete namespace cert-manager
+```
+
+Then, uninstall the CRD. Make sure to reference the deployed version to properly remove it:
+```bash    
+kubectl delete -f https://github.com/cert-manager/cert-manager/releases/download/v1.11.0/cert-manager.crds.yaml
+```
+
+Finally, delete kind's cluster with:
+```bash
+kind delete cluster --config=config.yaml
+```
+
 # Real world implementation 
 
-To finalize this implementation, we'll create a real world implementation using: GKE + Ingress + Lets Encrypt
+To dive deeper, create a real world implementation using: GKE + Ingress + Lets Encrypt.
 
-So, having a new account and project is mandatory before executing these steps.
+## 0 - Preconditions
+
+Having a GCP account and project is mandatory before executing these steps.
 
 ## 1 - GKE creation
 
-### Pre-requisites
-
-First, authenticate against GCP:
+Authenticate against GCP:
 
 ```bash
 gcloud auth login
@@ -145,7 +167,7 @@ export CLUSTER=cert-manager-cluster
 Create a kubernetes cluster, it will take ~5 minutes:
 
 ```bash
-gcloud container clusters create $CLUSTER --preemptible --num-nodes=1 --region=$REGION
+gcloud container clusters create ${CLUSTER} --preemptible --num-nodes=1 --region={$REGION}
 ```
 
 Set up GKE auth plugin for kubectl:
@@ -153,7 +175,7 @@ Set up GKE auth plugin for kubectl:
 ```bash
 gcloud components install gke-gcloud-auth-plugin
 export USE_GKE_GCLOUD_AUTH_PLUGIN=True
-gcloud container clusters get-credentials $CLUSTER --region=$REGION
+gcloud container clusters get-credentials $CLUSTER --region=${REGION}
 ```
 
 Check connections has been established successfully:
@@ -174,7 +196,7 @@ Expose the  web-server on port 8080:
 kubectl expose deployment web --port=8080
 ```
 
-## 3 - Create a static IP address
+## 3 - Static IP address creation
 
 To be reachable from outside the GKE cluster, we'll need to have a static IP address that will be, later on, mapped to 
 domain name.
@@ -196,7 +218,7 @@ Store the IP address in an environmental variable so it can be referenced in fut
 export IP_ADDRESS=$(gcloud compute addresses describe web-ip --format='value(address)' --global)
 ```
 
-## 4 - Register a domain for the website
+## 4 - Domain registration
 
 Usually, a regular Internet user does not remember the IP address of every service they consume but they remember their 
 domain name. 
@@ -206,7 +228,7 @@ So, we should buy and register a domain name in order to map it with the `web-ip
 Since this is a tutorial, that won't happen. We'll use the IP address raw.
 
 
-## 5 - Create an Ingress
+## 5 - Ingress creation
 
 To expose the web-server to the internet, a Kubernetes Ingress object must be created. This will trigger the creation 
 of several services in Google Cloud Platform to allow clients reaching it.
@@ -313,22 +335,33 @@ Version: 1.0.0
 Hostname: web-79d88c97d6-t8hj2
 ```
 
-## 6 - Install cert-manager
+## 6 - `cert-manager` installation
 
 To issue a self-signed certificate, first we'll have to install `cert-manager`in the created cluster.
 
 We'll do it via Helm again. So we'll use the first section as reference.
 
-## 7 - Create an Issuer for Let's Encrypt in Staging
+## 7 - `Issuer` creation for Let's Encrypt staging 
 
-In order to create a new SSL Certificate, cert-manager needs to be instructed on how to sign it. So, an `Issuer` custom
-resource needs to be configured to connect with Let's Encrypt staging server, allowing us to test our setup without 
-consuming our Let's Encrypt certificate quota for the domain name.
+In order to create a new SSL Certificate, cert-manager needs to be instructed on how to sign it. So, an 
+`Issuer`/`ClusterIssuer` custom resource needs to be configured to connect with Let's Encrypt servers.
 
-Generate the `Issuer` manifest, **change the email address env var** before executing it:
+Both `Issuer` and `ClusterIssuer` identify which Certificate Authority cert-manager will use to issue a certificate,
+but the differences are:
+- `Issuer`: namespace-scoped resource => can issue certificates in its own namespace only.
+  - Uses `cert-manager.io/issuer:` Ingress' annotation key.
+- `ClusterIssuer`: cluster wide resource => can issue certificates in any namespace.
+  - Uses  `cert-manager.io/cluster-issuer:` Ingress' annotation key.
+
+So, to make cert-manager automatically generate a certificate it's required to define the `Issuer`. 
+
+First, define the email address as environmental var. **Remember to replace with yours**:
 ```bash
 EMAIL_ADDRESS=your_email_here # ! Replace with your email
+```
 
+Secondly, define the `Issuer` manifest:
+```bash
 cat << EOF > issuer-lets-encrypt-staging.yaml
 apiVersion: cert-manager.io/v1
 kind: Issuer
@@ -347,7 +380,7 @@ spec:
 EOF
 ```
 
-Then apply it with kubectl:
+Finally apply it with kubectl:
 ```bash
 kubectl apply -f issuer-lets-encrypt-staging.yaml
 ```
@@ -373,7 +406,7 @@ Status:
     Type:                  Ready
 ```
 
-## 8 - Re-configure the Ingress for SSL
+## 8 - Ingress SSL reconfiguration
 
 It's time to use our new certificate and for that we need to reconfigure the Ingress to accept `HTTPS`.
 
@@ -403,12 +436,12 @@ kubectl apply -f secret.yaml
 
 Done with the workaround, it's time to update Ingress' manifest definition to use the staging certificate.
 
-First, define an environmental variable for the registered domain:
+First, define an environmental variable for the registered domain. **Remember to replace with yours**:
 ```bash
 DOMAIN_NAME=your_domain_here
 ```
 
-Then, update Ingress' definition with `cert-manager`'s annotation & the `tls` spec block:
+Secondly, update Ingress' definition with `cert-manager`'s annotation & the `tls` spec block:
 ```bash
 cat << EOF > ingress.yaml
 apiVersion: networking.k8s.io/v1
@@ -458,7 +491,7 @@ spec:
 
 ---
 
-After updating Ingress' definition, apply it:
+Then apply it with kubectl:
 ```bash
 kubectl apply -f ingress.yaml
 ```
@@ -478,7 +511,7 @@ curl -v --insecure https://$IP_ADDRESS
 ```
 
 
-## 9 - Create a production ready SSL certificate
+## 9 - SSL production ready certificate creation
 
 Once everything is working fine in Let's Encrypt's staging server, switch to the production and get a trusted SSL 
 certificate.
@@ -558,39 +591,47 @@ Remember it's also accessible via the browser, without any errors nor warnings, 
 
 ## 10 - Recap
 
-### Part 1
+The following diagram shines a light over the involved steps and the interaction between all the moving parts of this 
+process:
 
-Set up the environment:
+![Cert-manager and GCP interaction diagram](cert-manager-gcp-diagram.png)
 
-Create cluster -> generate static IP address -> HTTP:8080 Ingress -> register a domain and create an A record with the 
-static IP to solve DNS queries.
+
+Now it's time to identify all three main stages of the process.  
+
+### Stage 1 - Environment bootstrap
+
+- Create a GKE cluster.
+- Deploy a web server listening in port 8080.
+- Generate a static IP address.
+- Register a domain and create an A record for the static IP to solve DNS queries.
+- Create an Ingress and expose port 8080 through HTTP.
 
 At this point we expose our web server via HTTP using a domain name with our static IP address.
 
 ---
-### Part 2
+### Stage 2 - SSL first steps
 
-Then, the SSL process begins:
+1. Install `cert-manager`.
+2. Define `Issuer` manifest to use Let's Encrypt staging server.
+3. Define an empty TLS secret.
+4. Update Ingress definition adding:
+   - Annotation `cert-manager.io/issuer: letsencrypt-staging`.
+   - `spec tls:` referencing the created secret and defining our domain name.
 
-install cert-manager -> create issuer manifest using Let's Encrypt staging server -> define an empty TLS secret -> 
-update Ingress config with:
-- cert-manager.io/issuer: letsencrypt-staging annotation.
-- spec tls: referencing the created 
-secret and defining our domain name.
-
-At this point we expose our web server via insecure HTTPS since we're using LE staging server.
+At this point we expose our web server via insecure HTTPS since we're using Let's Encrypt staging server.
 
 #### How does it work?
-cert-manager verifies Ingress' endpoint, detects the secret definition and auto-generates a signed certificate for the specified domain using the
-`Issuer` custom resource as issuer.  
+`cert-manager` verifies Ingress' endpoint, detects the secret definition and auto-generates a signed certificate for the specified domain using the
+`Issuer` custom resource as the signing authority.
 
 ---
 
-### Part 3
+### Stage 3 - SSL production ready
 
-Finally, the SSL process concludes:
-create issuer manifest using Let's Encrypt production server (secret will be auto-updated) -> update Ingress config with:
-- cert-manager.io/issuer: letsencrypt-production annotation.
+1. Define `Issuer` manifest to use Let's Encrypt production server (secret will be auto-updated).
+2. Use Let's Encrypt production server overwriting Ingress definition with 
+3. `cert-manager.io/issuer: letsencrypt-production` annotation.
 
 At this point we expose our web server via secure HTTP since we're using LE production server. The web server can be 
 accessed through the browser.
@@ -599,8 +640,8 @@ accessed through the browser.
 
 Here's a brief summary of all the operations performed by cert-manager & ingress-gce:
 
-1. cert-manager connects to Let's Encrypt and sends an SSL certificate signing request.
-2. Let's Encrypt responds with a "challenge", which is a unique token that cert-manager must make available at a well-known location on the target web site. This proves that you are an administrator of that web site and domain name.
+1. `cert-manager` connects to Let's Encrypt and sends an SSL certificate signing request.
+2. Let's Encrypt responds with a "challenge", which is a unique token that `cert-manager` must make available at a well-known location on the target web site. This proves that you are an administrator of that web site and domain name.
 3. cert-manager deploys a Pod containing a temporary web server that serves the Let's Encrypt challenge token.
 4. cert-manager reconfigures the Ingress, adding a `rule` to route requests for from Let's Encrypt to that temporary web server.
 5. Google Cloud ingress controller reconfigures the external HTTP load balancer with that new rule.
@@ -609,39 +650,17 @@ Here's a brief summary of all the operations performed by cert-manager & ingress
 8. Google Cloud ingress controller uploads the signed certificate and associated private key to a Google Cloud certificate.
 9. Google Cloud ingress controller reconfigures the external load balancer to serve the uploaded SSL certificate.
 
----
-
-We: 
-
-1. Created a kubernetes cluster.
-2. Deployed a web server internally.
-3. Created a static IP address.
-4. Created a domain name and its A record with our static IP.
-5. Deployed an Ingress and exposed our web server insecurely via HTTP:8080.
-6. Installed cert-manager.
-7. Created an
-
 
 ## 11 - Clean up
 
-
-# Uninstall cert-manager
-
-First, it's required to uninstall the tool itself using:
-
+After finishing this workshop,  do the proper clean up in order to avoid additional billing for unused resources:
 ```bash
-helm --namespace cert-manager delete cert-manager
-```
-    
+# Delete the cluster and all the Google Cloud resources related to the Ingress that it contains
+gcloud container clusters delete $CLUSTER
 
-Then, delete the namespace:
-    
-```bash
-kubectl delete namespace cert-manager
-```
+# Delete the domain name
+gcloud dns record-sets delete ${DOMAIN_NAME} --zone ${ZONE} --type A
 
-And finally, uninstall the CRD. Make sure to reference the deployed version to properly remove it:
-
-```bash    
-kubectl delete -f https://github.com/cert-manager/cert-manager/releases/download/v1.11.0/cert-manager.crds.yaml
+# Delete the static IP address
+gcloud compute addresses delete web-ip --global
 ```
