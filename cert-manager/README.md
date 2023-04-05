@@ -418,7 +418,7 @@ cert-manager adds to the Ingress and which must then be translated into Google C
 
 So, we need to first create an empty secret:
 ```bash
-cat << EOF > secret.yaml
+cat << EOF > secret-tls.yaml
 apiVersion: v1
 kind: Secret
 metadata:
@@ -431,7 +431,7 @@ EOF
 ```
 Then apply secret's manifest:
 ```bash
-kubectl apply -f secret.yaml
+kubectl apply -f secret-tls.yaml
 ```
 
 Done with the workaround, it's time to update Ingress' manifest definition to use the staging certificate.
